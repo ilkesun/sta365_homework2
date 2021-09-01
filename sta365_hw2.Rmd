@@ -1,0 +1,234 @@
+---
+title: "STA365 HW2"
+author: "Ilke Sun"
+date: "30/03/2021"
+output: pdf_document
+---
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+library(cmdstanr)
+library(tidyverse)
+library(tidybayes)
+library(posterior)
+library(knitr)
+library(rstanarm)
+library(bayesplot)
+library(ggplot2)
+```
+
+# Task 1
+
+```{r explore}
+exp_data <- read_rds("experimental_data.RDS")
+tre_data <- exp_data %>% subset(Z == 1)
+pla_data <- exp_data %>% subset(Z == 0)
+pop_data <- read_rds("population.RDS")
+
+unique(pop_data$major) # 5 levels
+unique(pop_data$gender) # 3 levels, 3 x 5 = 15 combinations
+unique(exp_data$major)
+unique(exp_data$gender) # same levels with pop_data
+range(exp_data$anxiety_before)
+range(exp_data$anxiety_after)
+```
+
+```{r figures}
+pop_prop <- 
+  pop_data %>% 
+  count(major, gender) %>% 
+  mutate(prop = n/nrow(pop_data))
+kable(pop_prop)
+
+hist(exp_data$anxiety_before, 
+     xlab = "Pre-Treatment Anxiety Score", 
+     main = "Pre-Treatment")
+hist(pla_data$anxiety_after, 
+     xlab = "Post-Treatment Anxiety Score", 
+     main = "Post-Treatment Scores of Placebo Group")
+rm(pla_data)
+hist(tre_data$anxiety_after, 
+     xlab = "Post-Treatment Anxiety Score", 
+     main = "Post-Treatment Scores of Treatment Group")
+rm(tre_data)
+exp_data %>% 
+  ggplot(aes(x = anxiety_before, y = anxiety_after)) +
+  geom_point() + geom_smooth(method = "lm") +
+  xlab("Pre-Intervention Anxiety Scores") +
+  ylab("Post-Intervention Anxiety Scores")
+```
+
+## Pre Anxiety Model
+
+\begin{align*}
+{PreAnxiety Score} &= \mu + u^\text{gender}_{\text{gender}[i]} + u^\text{major}_{\text{major}[i]} \\
+u^\text{gender} &\sim N(0, \tau_\text{gender}^2) \\
+u^\text{major} &\sim N(0, \tau_\text{major}^2) 
+\end{align*}
+
+```{r pre_mod}
+pre_mod <- cmdstan_model("pre.stan")
+pre_mod$print()
+stan_data <- list(N = nrow(exp_data), 
+                  J_major = length(unique(exp_data$major)), 
+                  J_gender = length(unique(exp_data$gender)), 
+                  anxiety_before = exp_data$anxiety_before, 
+                  major = exp_data$major, 
+                  gender = exp_data$gender,
+                  lower_bound = 10, upper_bound = 50, only_prior = 1)
+
+pre_fit <- pre_mod$sample(stan_data, parallel_chains = 4, refresh = 0,
+                          show_messages = F, seed = 666)
+pre_fit$print(max_rows = 13)
+mcmc_hist(pre_fit$draws(c("mu", "sigma", "u_major[1]", "u_major[2]", 
+                          "u_major[3]", "u_major[4]", "u_major[5]", 
+                          "u_gender[1]", "u_gender[2]", "u_gender[3]")))
+stan_data$only_prior = 0
+pre_fit <- pre_mod$sample(stan_data, parallel_chains = 4, refresh = 0,
+                          show_messages = F, seed = 666)
+pre_fit$print(max_rows = 13)
+mcmc_hist(pre_fit$draws(c("mu", "sigma", "u_major[1]", "u_major[2]", 
+                          "u_major[3]", "u_major[4]", "u_major[5]", 
+                          "u_gender[1]", "u_gender[2]", "u_gender[3]")))
+
+rhats <- rhat(pre_fit)
+mcmc_rhat_hist(rhats)
+rm(stan_data, rhats, pre_mod)
+
+pre_samples <- pre_fit$draws(c("lp__", "mu", "sigma", "tau_major", "tau_gender",
+                               "u_major[1]", "u_major[2]", "u_major[3]", 
+                               "u_major[4]", "u_major[5]", "u_gender[1]", 
+                               "u_gender[2]", "u_gender[3]")) %>%
+  as_draws_df()
+```
+
+## Post Anxiety Model
+
+\begin{align*}
+{PostAnxiety Score} &= \mu + \beta_1 * {PreAnxiety Score} + \beta_2 * Z + u^\text{gender}_{\text{gender}[i]} + u^\text{major}_{\text{major}[i]} \\
+u^\text{gender} &\sim N(0, \tau_\text{gender}^2) \\
+u^\text{major} &\sim N(0, \tau_\text{major}^2) 
+\end{align*}
+
+```{r post_mod}
+post_mod <- cmdstan_model("post.stan")
+post_mod$print()
+stan_data <- list(N = nrow(exp_data), 
+                  J_major = length(unique(exp_data$major)), 
+                  J_gender = length(unique(exp_data$gender)), 
+                  anxiety_before = exp_data$anxiety_before, 
+                  major = exp_data$major, 
+                  gender = exp_data$gender,
+                  Z = exp_data$Z,
+                  anxiety_after = exp_data$anxiety_after,
+                  lower_bound = 10, upper_bound = 50, only_prior = 1)
+post_fit <- post_mod$sample(stan_data, parallel_chains = 4, refresh = 0,
+                            show_messages = F, seed = 666, adapt_delta = 0.99)
+# 8 divergences when adapt_delta = 0.8
+post_fit$print(max_rows = 15)
+mcmc_hist(post_fit$draws(c("mu", "sigma", "beta1", "beta2", "u_major[1]", 
+                           "u_major[2]", "u_major[3]", "u_major[4]", 
+                           "u_major[5]", "u_gender[1]", "u_gender[2]", 
+                           "u_gender[3]")))
+rhats <- rhat(post_fit)
+mcmc_rhat_hist(rhats)
+stan_data$only_prior = 0
+post_fit <- post_mod$sample(stan_data, parallel_chains = 4, refresh = 0, 
+                            show_messages = F, seed = 666, adapt_delta = 0.99)
+# 7 divergences when adapt_delta = 0.8
+post_fit$print(max_rows = 15)
+mcmc_hist(post_fit$draws(c("mu", "sigma", "beta1", "beta2", "u_major[1]", 
+                           "u_major[2]", "u_major[3]", "u_major[4]", 
+                           "u_major[5]", "u_gender[1]", "u_gender[2]", 
+                           "u_gender[3]")))
+
+rhats <- rhat(post_fit)
+mcmc_rhat_hist(rhats)
+rm(stan_data, rhats, post_mod)
+
+post_samples <- post_fit$draws(c("lp__", "mu", "sigma", "beta1", "beta2", 
+                                 "tau_major", "tau_gender", "u_major[1]", 
+                                 "u_major[2]", "u_major[3]", "u_major[4]", 
+                                 "u_major[5]", "u_gender[1]", "u_gender[2]", 
+                                 "u_gender[3]")) %>%
+  as_draws_df()
+```
+
+```{r loo}
+loo_pre <- pre_fit$loo(save_psis = T)
+print(loo_pre)
+plot(loo_pre)
+loo_post <- post_fit$loo(save_psis = T)
+print(loo_post)
+plot(loo_post)
+loo_compare(loo_pre, loo_post)
+rm(loo_pre, loo_post, pre_fit, post_fit)
+```
+
+In the first task I have fitted two models to the experimental data. The first model predicts the pre-intervention math anxiety scores with the given variables gender and major as random effects. There are three categories in gender and five in major, hence, there are 15 different combinations of these variables. That is the reason why the `pop_prop` has 15 rows, each represents a unique combination of these variables. Moreover, associated number of people in the population and proportion in those cells are also reported in `pop_prop`. The second model predicts the post-intervention math anxiety scores and in this model there are two additional variables compared to the first model which are pre-intervention anxiety scores of subjects and Z, indicator for subject being in placebo (0) or treatment (1) group. Both of these variables are considered as fixed effects in this model.
+
+Observing our posterior checks, we see that the model fits the data sensibly, there are no unexpected centralization, skew or shift in means. Some of the random effect variables have more centralized graphs where most of the values are clustered around the mean. However, this does not create any issues regrading our model or the predictions. Both of these models have appropriate r-hats which are graphed above. Moreover, all models have `ess_bulk` and `ess_tail` well above 500, the lowest value is 984 which corresponds to `ess_bulk` of $\tau_{major}$ in the first model. Additionally from the PSIS diagnostic plots above we confirm that k values are in the desired range. Thus, we can conclude that both of these models fit well to data. When these models are compared with each other we observe that model 2 is a slightly better fit when compared with model 1. 
+
+# Task 2
+
+```{r mrp, warning=F}
+u_gender_long <- spread_draws(pre_samples, u_gender[gender]) %>% 
+  select(gender, u_gender, .draw) #4k * 3
+u_gender_matrix <- u_gender_long %>% 
+  pivot_wider(names_from = gender, values_from = u_gender) %>% 
+  select(-.draw) %>% 
+  as.matrix
+u_major_long <- spread_draws(pre_samples, u_major[major]) %>% 
+  select(major, u_major, .draw) #4k * 5
+u_major_matrix <- u_major_long %>% 
+  pivot_wider(names_from = major, values_from = u_major) %>% 
+  select(-.draw) %>% 
+  as.matrix
+
+pred_anxiety = matrix(pre_samples$mu, nrow = 4000) %*% matrix(1, ncol = 15) + 
+  u_gender_matrix[,pop_prop$gender] + u_major_matrix[,pop_prop$major] 
+#3*5 = 15 cols, 4000 samples
+
+mean_pre_anxiety <- colMeans(pred_anxiety)
+
+u_gender_long <- spread_draws(post_samples, u_gender[gender]) %>% 
+  select(gender, u_gender, .draw) 
+u_gender_matrix <- u_gender_long %>% 
+  pivot_wider(names_from = gender, values_from = u_gender) %>% 
+  select(-.draw) %>% 
+  as.matrix
+u_major_long <- spread_draws(post_samples, u_major[major]) %>% 
+  select(major, u_major, .draw) 
+u_major_matrix <- u_major_long %>% 
+  pivot_wider(names_from = major, values_from = u_major) %>% 
+  select(-.draw) %>% 
+  as.matrix
+
+pred_post_anxiety <- matrix(post_samples$mu, nrow = 4000) %*% 
+  matrix(1, ncol = 15) + u_gender_matrix[,pop_prop$gender] + 
+  u_major_matrix[,pop_prop$major] + matrix(post_samples$beta1, nrow = 4000) %*% 
+  matrix(mean_pre_anxiety, ncol = 15)
+
+mean_post_anxiety <- colMeans(pred_post_anxiety)
+
+pred_post_anxiety_Z <- matrix(post_samples$mu, nrow = 4000) %*% 
+  matrix(1, ncol = 15) + u_gender_matrix[,pop_prop$gender] + 
+  u_major_matrix[,pop_prop$major] + matrix(post_samples$beta1, nrow = 4000) %*% 
+  matrix(mean_pre_anxiety, ncol = 15) + 
+  matrix(post_samples$beta2, nrow = 4000) %*% matrix(1, ncol = 15)
+
+mean_post_anxiety_Z <- colMeans(pred_post_anxiety_Z)
+
+y_Z1 = mean_pre_anxiety - mean_post_anxiety_Z
+y_Z0 = mean_pre_anxiety - mean_post_anxiety
+
+E_Z1 = sum(y_Z1 * pop_prop$prop)
+E_Z0 = sum(y_Z0 * pop_prop$prop)
+
+ATE = E_Z1 - E_Z0
+ATE
+```
+
+In the second task, I have used the models I have created in the first task to predict the means for different cells. Then with these means I have calculated the difference between the pre- and post-intervention. Furthermore, I have used the proportions given in `pop_prop` to find the expected results when $Z = 0$ and $Z = 1$. Finally, I have calculated the average treatment effect from $\mathbb{E}(y | Z = 1) - \mathbb{E}(y | Z = 0)$.
+
+The ATE is approximately 2.72 which suggests that the treatment is actually effective. Thus, we can say that this intervention is effective in decreasing math anxiety. Considering that we have poststratified our results to the population, this ATE entails that on average the treatment will decrease the math-anxiety by 2.72 units. Moreover considering the anxiety scores range between 10 and 50 this is a fairly high effect size on decreasing math anxiety.
